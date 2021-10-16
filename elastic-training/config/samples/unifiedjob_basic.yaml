@@ -1,0 +1,13 @@
+apiVersion: ai.centauruscloud.io/v1alpha1
+kind: UnifiedJob
+metadata:
+  name: BaseSample
+jobType: BaseJob
+spec:
+  jobSpec:
+    image: hxhp/elastic-horovod-demo:1.0
+    pythonCommand:
+      - sleep 600
+  replicaSpec:
+    minReplicas: 2
+    maxReplicas: 5

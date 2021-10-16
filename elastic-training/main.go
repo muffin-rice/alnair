@@ -28,6 +28,7 @@ import (
 
 	aiv1alpha1 "elastictraining/api/v1alpha1"
 	"elastictraining/controllers"
+
 	sigsv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -68,30 +69,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.HorovodJobReconciler{
+	if err = (&controllers.UnifiedJobReconciler{
 		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("HorovodJob"),
+		Log:    ctrl.Log.WithName("controllers").WithName("UnifiedJob"),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "HorovodJob")
+		setupLog.Error(err, "unable to create controller", "controller", "UnifiedJob")
 		os.Exit(1)
 	}
 
-	if err = (&controllers.ElasticHorovodJobReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("ElasticHorovodJob"),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ElasticHorovodJob")
-		os.Exit(1)
-	}
-
-	if err = (&controllers.SchedulerReconciler{
+	if err = (&controllers.UnifiedSchedulerReconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("Scheduler"),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Scheduler")
+		setupLog.Error(err, "unable to create controller", "controller", "UnifiedScheduler")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -81,7 +81,7 @@ var _ = BeforeSuite(func(done Done) {
 	})
 	Expect(err).ToNot(HaveOccurred())
 
-	err = (&SchedulerReconciler{
+	err = (&UnifiedSchedulerReconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("Scheduler"),
 		Scheme: mgr.GetScheme(),

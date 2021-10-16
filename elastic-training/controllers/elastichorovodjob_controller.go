@@ -308,7 +308,7 @@ func (r *ElasticHorovodJobReconciler) desiredWorkers(ehjob aiv1alpha1.ElasticHor
 					},
 				},
 				Spec: corev1.PodSpec{
-					SchedulerName: "default-scheduler", //change if adding other schedulers 
+					SchedulerName: "default-scheduler", //change if adding other schedulers
 					Volumes: []corev1.Volume{
 						{
 							Name: "sshkeys",
