@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
 	aiv1alpha1 "elastictraining/api/v1alpha1"
 	"fmt"
@@ -24,7 +25,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/prometheus/common/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -53,7 +53,7 @@ func (r *UnifiedSchedulerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	//rescheduling to find global optima
-	if time.Now().Sub(r.timestamp).Minutes() > TIME_RESCHEDULING {
+	if time.Since(r.timestamp).Minutes() > TIME_RESCHEDULING {
 
 		nodeMap := r.TotalNodeMap(ctx)
 		log.Info("Rescheduling Jobs")
@@ -72,6 +72,7 @@ func (r *UnifiedSchedulerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	//New job, find available resources
+	log.Info("Looking for resources")
 	nodeMap, sortedKeys := r.AllocatableNodeMap(ctx)
 
 	//find possible nodes
@@ -89,15 +90,26 @@ func (r *UnifiedSchedulerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			continue
 		}
 		if nodeMap[nodeName] < *ujob.Spec.ReplicaSpec.MaxReplicas {
+			if len(currNodeConfig) != 0 {
+				break
+			}
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		currNodeConfig[nodeName] = nodeMap[nodeName]
 		break
 	}
 
-	if err := r.updateTargetReplicas(ctx, ujob, currNodeConfig); err != nil {
+	if len(currNodeConfig) == 0 {
+		log.Info("No suitable node configuration found.")
 		return ctrl.Result{RequeueAfter: TIME_REQUEUE * time.Second}, nil
 	}
+
+	if err := r.updateTargetReplicas(ctx, ujob, currNodeConfig); err != nil {
+		log.Info(fmt.Sprintf("Error in updating Target Replicas: %s", err.Error()))
+		return ctrl.Result{RequeueAfter: TIME_REQUEUE * time.Second}, nil
+	}
+
+	log.Info(fmt.Sprintf("Target Replicas for job %s updated to %s (nodeConfig)", ujob.Name, mapAsString(currNodeConfig)))
 
 	// cannot find enough GPU even after preemption, wait for some time and try again
 	return ctrl.Result{RequeueAfter: TIME_REQUEUE * time.Second}, nil
@@ -117,7 +129,7 @@ func (r *UnifiedSchedulerReconciler) TotalNodeMap(ctx context.Context) map[strin
 	var nodeList corev1.NodeList
 	_ = r.List(ctx, &nodeList)
 
-	var nodeMap map[string]int64
+	nodeMap := map[string]int64{}
 
 	for _, node := range nodeList.Items {
 		gpus := node.Status.Capacity["nvidia.com/gpu"]
@@ -146,7 +158,7 @@ func (r *UnifiedSchedulerReconciler) AllocatableNodeMap(ctx context.Context) (ma
 	var nodeList corev1.NodeList
 	_ = r.List(ctx, &nodeList)
 
-	var nodeMap map[string]int64
+	nodeMap := map[string]int64{}
 
 	for _, node := range nodeList.Items {
 		gpus := node.Status.Allocatable["nvidia.com/gpu"]
@@ -158,8 +170,8 @@ func (r *UnifiedSchedulerReconciler) AllocatableNodeMap(ctx context.Context) (ma
 
 	//use keySorter instead
 
-	var sortedKeys keySorter = make([]kvPair, 0, len(nodeMap))
-	sortedKeyList := make([]string, 0, len(nodeMap))
+	var sortedKeys keySorter = make([]kvPair, len(nodeMap))
+	sortedKeyList := make([]string, len(nodeMap))
 	i := 0
 	for k := range nodeMap {
 		sortedKeys[i] = kvPair{k, nodeMap[k]}
@@ -209,10 +221,15 @@ func (r *UnifiedSchedulerReconciler) RescheduleJobs(nodeMap map[string]int64, qu
 
 func (r *UnifiedSchedulerReconciler) updateTargetReplicas(ctx context.Context, ujob aiv1alpha1.UnifiedJob, nodeConfig map[string]int64) error {
 	ujob.Spec.ReplicaSpec.TargetReplicas = nodeConfig
-	if err := r.Update(ctx, &ujob); err != nil {
-		log.Info(fmt.Sprintf("Error in updating target replicas for ElasticHorovodJob %s/%s: %s.",
-			ujob.Namespace, ujob.Name, err.Error()))
-		return err
+	return r.Update(ctx, &ujob)
+}
+
+func mapAsString(m map[string]int64) string {
+	b := new(bytes.Buffer)
+	fmt.Fprint(b, "{")
+	for k, v := range m {
+		fmt.Fprintf(b, "%s : %d, ", k, v)
 	}
-	return nil
+	fmt.Fprint(b, "}")
+	return b.String()
 }

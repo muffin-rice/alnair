@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,7 +42,12 @@ type UnifiedJobReconciler struct {
 }
 
 type UnifiedJobInterface interface {
+	//test simply ensures that the interface is plugged in correctly
 	Test() string
+
+	//init initializes constants
+	Init()
+
 	//check if names of services, workers, etc. are mismatched
 	//NamesMismatch(ujob aiv1alpha1.UnifiedJob) bool
 
@@ -59,7 +65,7 @@ type UnifiedJobInterface interface {
 	DeleteAll(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, deleteOpts []client.DeleteOption) error
 
 	//check if service exists
-	ServiceExists(reconciler *UnifiedJobReconciler, ctx context.Context) bool
+	ServiceExists(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool
 
 	//create and patch service
 	CreateService(reconciler *UnifiedJobReconciler, ctx context.Context, applyOpts []client.PatchOption, ujob aiv1alpha1.UnifiedJob) error
@@ -100,13 +106,9 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("unifiedjob-controller")}
 
-	//if jobController.NamesMismatch(ujob) {
-	//	jobController.UpdateNames(ctx, ujob)
-	//}
-
 	if err := jobController.UpdateStatus(r, ctx, ujob, applyOpts); err != nil {
 		log.Info(fmt.Sprintf("Error in updating status: %s.", err.Error()))
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	log.Info(fmt.Sprintf("Job %s currently has status %s", ujob.Name, ujob.Status.UnifiedJobStatus))
@@ -139,12 +141,12 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	//no logic for in-job elasticity yet
 
 	//create service if necessary
-	if !jobController.ServiceExists(r, ctx) {
-		log.Info("Service created.")
+	if !jobController.ServiceExists(r, ctx, ujob) {
 		if err := jobController.CreateService(r, ctx, applyOpts, ujob); err != nil {
 			log.Info(fmt.Sprintf("Error in creating service: %s.", err.Error()))
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		return ctrl.Result{}, nil
+		log.Info("Service successfully created.")
 	}
 
 	//if the job is just waiting, do nothing
@@ -184,8 +186,17 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	//basejob_controller := &BaseJobController{}
 	var basejob_controller UnifiedJobInterface = BaseJobController{}
+	var torchelastic_controller UnifiedJobInterface = TorchElasticJobController{}
+	var elastichorovod_controller UnifiedJobInterface = ElasticHorovodJobController{}
+
+	basejob_controller.Init()
+	torchelastic_controller.Init()
+	elastichorovod_controller.Init()
+
 	r.JobInterfaceMap = map[string]UnifiedJobInterface{
-		string(aiv1alpha1.BasicJobType): basejob_controller,
+		string(aiv1alpha1.BasicJobType):          basejob_controller,
+		string(aiv1alpha1.ElasticPytorchJobType): torchelastic_controller,
+		string(aiv1alpha1.ElasticHorovodJobType): elastichorovod_controller,
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

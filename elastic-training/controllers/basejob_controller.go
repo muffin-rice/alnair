@@ -34,10 +34,15 @@ import (
 )
 
 type BaseJobController struct {
+	jobName string
 }
 
 func (r BaseJobController) Test() string {
 	return "BaseJobController"
+}
+
+func (r BaseJobController) Init() {
+	r.jobName = "basejob-%s"
 }
 
 func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error {
@@ -79,7 +84,7 @@ func (r BaseJobController) DeleteAll(reconciler *UnifiedJobReconciler, ctx conte
 	return r.ReleaseResources(reconciler, ctx, ujob, deleteOpts)
 }
 
-func (r BaseJobController) ServiceExists(reconciler *UnifiedJobReconciler, ctx context.Context) bool {
+func (r BaseJobController) ServiceExists(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
 	return true
 }
 
