@@ -47,40 +47,38 @@ func (r ElasticHorovodJobController) Test() string {
 	return "ElasticHorovodJobController"
 }
 
-func (r ElasticHorovodJobController) Init() {
-	r.svcName = "ehservice-%s"
-	r.jobName = "ehjob-%s"
-	r.workerName = "ehworkers-%s"
-	r.pgName = "ehpodgroup-%s"
-}
-
-func (r ElasticHorovodJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error {
+func (r ElasticHorovodJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool) {
 	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
+	oldStatus := ujob.Status.UnifiedJobStatus
+	var newStatus aiv1alpha1.UnifiedJobStatusType
 
 	//check statefulset status
 	if ujob.Spec.ReplicaSpec.TargetReplicas == nil {
-		ujob.Status.UnifiedJobStatus = aiv1alpha1.JobWaiting
+		newStatus = aiv1alpha1.JobWaiting
 	} else {
 		job, err := r.getJob(reconciler, ctx, jobName, ujob.Namespace)
 		if err != nil {
 			if errors.IsNotFound(err) {
+				newStatus = aiv1alpha1.JobPending
 				reconciler.Log.Info("Job not found (not ready).")
 			} else {
 				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
 			}
-			return nil
-		}
-
-		if job.Status.Succeeded == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobCompleted
-		} else if job.Status.Failed == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobFailed
-		} else if job.Status.Active == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobRunning
+		} else {
+			if job.Status.Succeeded == 1 {
+				newStatus = aiv1alpha1.JobCompleted
+			} else if job.Status.Failed == 1 {
+				newStatus = aiv1alpha1.JobFailed
+			} else if job.Status.Active == 1 {
+				newStatus = aiv1alpha1.JobRunning
+			}
 		}
 	}
 
-	return reconciler.Status().Update(ctx, &ujob)
+	changed := newStatus == oldStatus
+	ujob.Status.UnifiedJobStatus = newStatus
+
+	return reconciler.Status().Update(ctx, &ujob), changed
 
 }
 

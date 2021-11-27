@@ -45,9 +45,6 @@ type UnifiedJobInterface interface {
 	//test simply ensures that the interface is plugged in correctly
 	Test() string
 
-	//init initializes constants
-	Init()
-
 	//check if names of services, workers, etc. are mismatched
 	//NamesMismatch(ujob aiv1alpha1.UnifiedJob) bool
 
@@ -56,7 +53,8 @@ type UnifiedJobInterface interface {
 
 	//update status of UnifiedJob.Status.UnifiedJobStatus to match actual job
 	//status update will be: if job running, change to running,
-	UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error
+	//returns bool for true if status changed, false elsewise
+	UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool)
 
 	//delete job, release resources, but not necessarily wipe everything out
 	ReleaseResources(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, deleteOpts []client.DeleteOption) error
@@ -106,12 +104,15 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("unifiedjob-controller")}
 
-	if err := jobController.UpdateStatus(r, ctx, ujob, applyOpts); err != nil {
+	err, change := jobController.UpdateStatus(r, ctx, ujob, applyOpts)
+	if err != nil {
 		log.Info(fmt.Sprintf("Error in updating status: %s.", err.Error()))
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	log.Info(fmt.Sprintf("Job %s currently has status %s", ujob.Name, ujob.Status.UnifiedJobStatus))
+	if change {
+		log.Info(fmt.Sprintf("Job %s updated status to %s", ujob.Name, ujob.Status.UnifiedJobStatus))
+	}
 
 	zero := int64(0)
 	deletepolicy := metav1.DeletePropagationForeground
@@ -185,13 +186,23 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	//basejob_controller := &BaseJobController{}
-	var basejob_controller UnifiedJobInterface = BaseJobController{}
-	var torchelastic_controller UnifiedJobInterface = TorchElasticJobController{}
-	var elastichorovod_controller UnifiedJobInterface = ElasticHorovodJobController{}
-
-	basejob_controller.Init()
-	torchelastic_controller.Init()
-	elastichorovod_controller.Init()
+	var basejob_controller UnifiedJobInterface = BaseJobController{
+		jobName: "basejob-%s",
+	}
+	var torchelastic_controller UnifiedJobInterface = TorchElasticJobController{
+		etcdSvcName:    "torchelastic-etcd-service",
+		etcdServerName: "etcd",
+		jobName:        "epjob-%s",
+		jobID:          "epjobid-%s",
+		workerName:     "epworkers-%s-%d",
+		pgName:         "eppodgroup-%s",
+	}
+	var elastichorovod_controller UnifiedJobInterface = ElasticHorovodJobController{
+		svcName:    "ehservice-%s",
+		jobName:    "ehjob-%s",
+		workerName: "ehworkers-%s",
+		pgName:     "ehpodgroup-%s",
+	}
 
 	r.JobInterfaceMap = map[string]UnifiedJobInterface{
 		string(aiv1alpha1.BasicJobType):          basejob_controller,

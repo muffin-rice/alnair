@@ -41,34 +41,35 @@ func (r BaseJobController) Test() string {
 	return "BaseJobController"
 }
 
-func (r BaseJobController) Init() {
-	r.jobName = "basejob-%s"
-}
-
-func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error {
+func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool) {
 	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
+	oldStatus := ujob.Status.UnifiedJobStatus
+	var newStatus aiv1alpha1.UnifiedJobStatusType
 
 	if ujob.Spec.ReplicaSpec.TargetReplicas == nil {
-		ujob.Status.UnifiedJobStatus = aiv1alpha1.JobWaiting
+		newStatus = aiv1alpha1.JobWaiting
 	} else {
 		job, err := r.getJob(reconciler, ctx, jobName, ujob.Namespace)
 		if err != nil {
 			if !errors.IsNotFound(err) {
 				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
 			}
-			return nil
+			return nil, false
 		}
 
 		if job.Status.Succeeded == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobCompleted
+			newStatus = aiv1alpha1.JobCompleted
 		} else if job.Status.Failed == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobFailed
+			newStatus = aiv1alpha1.JobFailed
 		} else if job.Status.Active == 1 {
-			ujob.Status.UnifiedJobStatus = aiv1alpha1.JobRunning
+			newStatus = aiv1alpha1.JobRunning
 		}
 	}
 
-	return reconciler.Status().Update(ctx, &ujob)
+	changed := newStatus == oldStatus
+	ujob.Status.UnifiedJobStatus = newStatus
+
+	return reconciler.Status().Update(ctx, &ujob), changed
 
 }
 
