@@ -38,23 +38,16 @@ type UnifiedJobReconciler struct {
 	client.Client
 	Log             logr.Logger
 	Scheme          *runtime.Scheme
-	JobInterfaceMap map[string]UnifiedJobInterface
+	JobInterfaceMap map[aiv1alpha1.UnifiedJobType]UnifiedJobInterface
 }
 
 type UnifiedJobInterface interface {
 	//test simply ensures that the interface is plugged in correctly
 	Test() string
 
-	//check if names of services, workers, etc. are mismatched
-	//NamesMismatch(ujob aiv1alpha1.UnifiedJob) bool
-
-	//update all names and patch if necessary
-	//UpdateNames(ctx context.Context, ujob aiv1alpha1.UnifiedJob) error
-
-	//update status of UnifiedJob.Status.UnifiedJobStatus to match actual job
-	//status update will be: if job running, change to running,
+	//update status of UnifiedJob.Status.UnifiedJobStatus
 	//returns bool for true if status changed, false elsewise
-	UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool)
+	UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (bool, error)
 
 	//delete job, release resources, but not necessarily wipe everything out
 	ReleaseResources(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, deleteOpts []client.DeleteOption) error
@@ -70,9 +63,6 @@ type UnifiedJobInterface interface {
 
 	//check if job is stuck in pending; ie resource conflict / race condition
 	StuckInPending(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool
-
-	//check if the job is running as expected
-	IsJobRunning(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool
 
 	//create and patch all
 	PatchAll(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error
@@ -95,19 +85,19 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if ujob.Spec.ReplicaSpec.TargetReplicas == nil {
-		log.Info("Nothing in TargetReplicas")
-		return ctrl.Result{}, nil
-	}
-
 	jobController := r.JobInterfaceMap[ujob.JobType]
 
 	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("unifiedjob-controller")}
 
-	err, change := jobController.UpdateStatus(r, ctx, ujob, applyOpts)
+	change, err := jobController.UpdateStatus(r, ctx, ujob, applyOpts)
+
 	if err != nil {
 		log.Info(fmt.Sprintf("Error in updating status: %s.", err.Error()))
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	if !change {
+		return ctrl.Result{}, nil
 	}
 
 	if change {
@@ -120,6 +110,12 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &deletepolicy,
 	}}
+
+	//do nothing if job completed
+	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobWaiting {
+		log.Info("Nothing in TargetReplicas")
+		return ctrl.Result{}, nil
+	}
 
 	//check if job completed
 	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobCompleted {
@@ -139,8 +135,6 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	//no logic for in-job elasticity yet
-
 	//create service if necessary
 	if !jobController.ServiceExists(r, ctx, ujob) {
 		if err := jobController.CreateService(r, ctx, applyOpts, ujob); err != nil {
@@ -150,9 +144,12 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info("Service successfully created.")
 	}
 
-	//if the job is just waiting, do nothing
-	if len(ujob.Spec.ReplicaSpec.TargetReplicas) == 0 {
-		log.Info(fmt.Sprintf("Target Replicas has not been set. Job status is %s", ujob.Status.UnifiedJobStatus))
+	log.Info("Service Exists")
+
+	//check if job is running as expected
+	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobRunning {
+		//end requeues
+		log.Info("Job is running as expected.")
 		return ctrl.Result{}, nil
 	}
 
@@ -169,19 +166,16 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	//check if job is running as expected
-	if jobController.IsJobRunning(r, ctx, ujob) {
-		log.Info("Job is running as expected.")
-		return ctrl.Result{}, nil
-	}
-
 	//check if workers are not ready
 	if err := jobController.PatchAll(r, ctx, ujob, applyOpts); err != nil {
 		log.Info(fmt.Sprintf("Job was unable to be created; %s", err.Error()))
-		return ctrl.Result{RequeueAfter: 5}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	return ctrl.Result{}, nil
+	log.Info("Job was successfully created.")
+
+	//requeue to update status
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -194,7 +188,9 @@ func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		etcdServerName: "etcd",
 		jobName:        "epjob-%s",
 		jobID:          "epjobid-%s",
-		workerName:     "epworkers-%s-%d",
+		workerName:     "epworkers-%s-%d-%d",
+		workerSvcName:  "epworkers-%s-service",
+		launcherName:   "eplauncher-%s",
 		pgName:         "eppodgroup-%s",
 	}
 	var elastichorovod_controller UnifiedJobInterface = ElasticHorovodJobController{
@@ -204,10 +200,10 @@ func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		pgName:     "ehpodgroup-%s",
 	}
 
-	r.JobInterfaceMap = map[string]UnifiedJobInterface{
-		string(aiv1alpha1.BasicJobType):          basejob_controller,
-		string(aiv1alpha1.ElasticPytorchJobType): torchelastic_controller,
-		string(aiv1alpha1.ElasticHorovodJobType): elastichorovod_controller,
+	r.JobInterfaceMap = map[aiv1alpha1.UnifiedJobType]UnifiedJobInterface{
+		aiv1alpha1.BasicJobType:          basejob_controller,
+		aiv1alpha1.ElasticPytorchJobType: torchelastic_controller,
+		aiv1alpha1.ElasticHorovodJobType: elastichorovod_controller,
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -221,4 +217,44 @@ func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *UnifiedJobReconciler) resetTargetReplicas(ctx context.Context, ujob aiv1alpha1.UnifiedJob) error {
 	ujob.Spec.ReplicaSpec.TargetReplicas = make(map[string]int64)
 	return r.Update(ctx, &ujob)
+}
+
+func (r *UnifiedJobReconciler) getPodsByLabel(ctx context.Context, namespace string, labels map[string]string) ([]corev1.Pod, error) {
+	var pl corev1.PodList
+
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels(labels),
+	}
+
+	if err := r.List(ctx, &pl, listOpts...); err != nil {
+		return pl.Items, err
+	}
+
+	return pl.Items, nil
+}
+
+//GENERIC HELPER FUNCTIONS -----------------------------------------------
+
+func getCurrentNodeConfig(podList []corev1.Pod) map[string]int64 {
+	nodeMap := make(map[string]int64)
+
+	for _, pod := range podList {
+		nodeName := pod.Spec.NodeName
+		if _, ok := nodeMap[nodeName]; ok {
+			nodeMap[nodeName] = 1
+		} else {
+			nodeMap[nodeName] += 1
+		}
+	}
+
+	return nodeMap
+}
+
+func getTotalGPU(nodeMap map[string]int64) int {
+	total := 0
+	for _, numGpu := range nodeMap {
+		total += int(numGpu)
+	}
+	return total
 }

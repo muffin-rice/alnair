@@ -21,6 +21,7 @@ import (
 	aiv1alpha1 "elastictraining/api/v1alpha1"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -41,35 +42,48 @@ func (r BaseJobController) Test() string {
 	return "BaseJobController"
 }
 
-func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool) {
+func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (bool, error) {
 	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
 	oldStatus := ujob.Status.UnifiedJobStatus
 	var newStatus aiv1alpha1.UnifiedJobStatusType
 
 	if ujob.Spec.ReplicaSpec.TargetReplicas == nil {
 		newStatus = aiv1alpha1.JobWaiting
+	} else if len(ujob.Spec.ReplicaSpec.TargetReplicas) > 1 {
+		newStatus = aiv1alpha1.JobPending
+		reconciler.Log.Info("Target Replicas is incorrect; stay in pending until restart")
 	} else {
 		job, err := r.getJob(reconciler, ctx, jobName, ujob.Namespace)
 		if err != nil {
 			if !errors.IsNotFound(err) {
 				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
 			}
-			return nil, false
+			return false, nil
 		}
 
-		if job.Status.Succeeded == 1 {
-			newStatus = aiv1alpha1.JobCompleted
-		} else if job.Status.Failed == 1 {
-			newStatus = aiv1alpha1.JobFailed
-		} else if job.Status.Active == 1 {
+		pod, err := r.getJobPod(reconciler, ctx, job)
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
+			}
+			return false, nil
+		}
+
+		if pod.Status.Phase == corev1.PodPending {
+			newStatus = aiv1alpha1.JobPending
+		} else if pod.Status.Phase == corev1.PodRunning {
 			newStatus = aiv1alpha1.JobRunning
+		} else if pod.Status.Phase == corev1.PodFailed {
+			newStatus = aiv1alpha1.JobFailed
+		} else if pod.Status.Phase == corev1.PodSucceeded {
+			newStatus = aiv1alpha1.JobCompleted
 		}
 	}
 
 	changed := newStatus == oldStatus
 	ujob.Status.UnifiedJobStatus = newStatus
 
-	return reconciler.Status().Update(ctx, &ujob), changed
+	return changed, reconciler.Status().Update(ctx, &ujob)
 
 }
 
@@ -95,45 +109,49 @@ func (r BaseJobController) CreateService(reconciler *UnifiedJobReconciler, ctx c
 
 func (r BaseJobController) StuckInPending(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
 
-	return false
+	job, err := r.getJob(reconciler, ctx, fmt.Sprintf(r.jobName, ujob.Name), ujob.Namespace)
 
-	// job, err := r.getJob(ctx, fmt.Sprintf("unifiedjob-%s", ujob.Name), ujob.Namespace, reconciler)
-	// if err != nil {
-	// 	if errors.IsNotFound(err) {
-	// 		reconciler.Log.Info("Job not found.")
-	// 	} else {
-	// 		reconciler.Log.Info(fmt.Sprintf("Job error: %s", err))
-	// 	}
-	// 	return job, err
-	// }
-
-	// if job.Status.Failed == 1 {
-	// 	time.Sleep(10 * time.Second)
-	// 	return true
-	// }
-
-	// return false
-
-}
-
-func (r BaseJobController) IsJobRunning(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
-
-	job, err := r.getJob(reconciler, ctx, fmt.Sprintf("unifiedjob-%s", ujob.Name), ujob.Namespace)
 	if err != nil {
-		reconciler.Log.Info(fmt.Sprintf("Job error: %s", err))
+		if errors.IsNotFound(err) {
+			reconciler.Log.Info("Job not found.")
+		} else {
+			reconciler.Log.Info(fmt.Sprintf("Job error: %s", err))
+		}
 		return false
 	}
 
-	return job.Status.Active > 0
+	passed := false
+
+	for i := 1; i <= 2; i++ {
+
+		pod, err := r.getJobPod(reconciler, ctx, job)
+
+		if err != nil {
+			reconciler.Log.Info(fmt.Sprintf("Could not find job pod: %s", err.Error()))
+			return false
+		}
+
+		if pod.Status.Phase == corev1.PodPending {
+			if !passed {
+				time.Sleep(10 * time.Second)
+				passed = true
+				break
+			}
+			return true
+		}
+
+		if !passed {
+			return false
+		}
+	}
+
+	return false
 
 }
 
 func (r BaseJobController) PatchAll(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) error {
 	//create and patch the job
 	m := ujob.Spec.ReplicaSpec.TargetReplicas
-	if len(m) != 1 {
-		reconciler.Log.Info("Target Replicas is incorrect ")
-	}
 
 	var numGpu int64
 	var nodeName string
@@ -157,34 +175,6 @@ func (r BaseJobController) PatchAll(reconciler *UnifiedJobReconciler, ctx contex
 	return nil
 }
 
-func (r BaseJobController) getJob(reconciler *UnifiedJobReconciler, ctx context.Context, name string, namespace string) (batchv1.Job, error) {
-	var job batchv1.Job
-	key := types.NamespacedName{
-		Namespace: namespace,
-		Name:      name,
-	}
-
-	if err := reconciler.Get(ctx, key, &job); err != nil {
-		return job, err
-	}
-
-	return job, nil
-}
-
-func (r BaseJobController) deleteJob(reconciler *UnifiedJobReconciler, ctx context.Context, name, namespace string, deleteOpts []client.DeleteOption) error {
-	var workers batchv1.Job
-	key := types.NamespacedName{
-		Namespace: namespace,
-		Name:      name,
-	}
-
-	if err := reconciler.Get(ctx, key, &workers); err != nil {
-		return nil
-	}
-
-	return reconciler.Delete(ctx, &workers, deleteOpts...)
-}
-
 func (r BaseJobController) desiredJob(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, numGpu int64, nodeName string) (batchv1.Job, error) {
 
 	one := int32(1)
@@ -195,6 +185,7 @@ func (r BaseJobController) desiredJob(reconciler *UnifiedJobReconciler, ctx cont
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("unifiedjob-%s", ujob.Name),
 			Namespace: ujob.Namespace,
+			Labels:    map[string]string{"UnifiedEPTJob": ujob.Name},
 		},
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
@@ -230,4 +221,41 @@ func (r BaseJobController) desiredJob(reconciler *UnifiedJobReconciler, ctx cont
 	}
 
 	return job, nil
+}
+
+func (r BaseJobController) getJob(reconciler *UnifiedJobReconciler, ctx context.Context, name string, namespace string) (batchv1.Job, error) {
+	var job batchv1.Job
+	key := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := reconciler.Get(ctx, key, &job); err != nil {
+		return job, err
+	}
+
+	return job, nil
+}
+
+func (r BaseJobController) getJobPod(reconciler *UnifiedJobReconciler, ctx context.Context, job batchv1.Job) (corev1.Pod, error) {
+	labels := map[string]string{
+		"UnifiedEPTJob": job.Name,
+	}
+
+	podList, err := reconciler.getPodsByLabel(ctx, job.Namespace, labels)
+	return podList[0], err
+}
+
+func (r BaseJobController) deleteJob(reconciler *UnifiedJobReconciler, ctx context.Context, name, namespace string, deleteOpts []client.DeleteOption) error {
+	var workers batchv1.Job
+	key := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := reconciler.Get(ctx, key, &workers); err != nil {
+		return nil
+	}
+
+	return reconciler.Delete(ctx, &workers, deleteOpts...)
 }

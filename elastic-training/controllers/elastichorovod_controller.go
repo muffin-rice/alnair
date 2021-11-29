@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -47,8 +48,8 @@ func (r ElasticHorovodJobController) Test() string {
 	return "ElasticHorovodJobController"
 }
 
-func (r ElasticHorovodJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (error, bool) {
-	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
+func (r ElasticHorovodJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, applyOpts []client.PatchOption) (bool, error) {
+	jobName := fmt.Sprintf(r.jobName, ujob.Name)
 	oldStatus := ujob.Status.UnifiedJobStatus
 	var newStatus aiv1alpha1.UnifiedJobStatusType
 
@@ -78,14 +79,14 @@ func (r ElasticHorovodJobController) UpdateStatus(reconciler *UnifiedJobReconcil
 	changed := newStatus == oldStatus
 	ujob.Status.UnifiedJobStatus = newStatus
 
-	return reconciler.Status().Update(ctx, &ujob), changed
+	return changed, reconciler.Status().Update(ctx, &ujob)
 
 }
 
 func (r ElasticHorovodJobController) ReleaseResources(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, deleteOpts []client.DeleteOption) error {
 	//TODO
-	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
-	workersName := fmt.Sprintf("unifiedjobworkers-%s", ujob.Name)
+	jobName := fmt.Sprintf(r.jobName, ujob.Name)
+	workersName := fmt.Sprintf(r.workerName, ujob.Name)
 
 	if err := r.deleteJob(reconciler, ctx, jobName, ujob.Namespace, deleteOpts); err != nil {
 		return err
@@ -100,8 +101,8 @@ func (r ElasticHorovodJobController) ReleaseResources(reconciler *UnifiedJobReco
 
 func (r ElasticHorovodJobController) DeleteAll(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, deleteOpts []client.DeleteOption) error {
 	//same as releaseresources + deleteservice
-	svcName := fmt.Sprintf("unifiedjobservice-%s", ujob.Name)
-	pgName := fmt.Sprintf("unifiedjobpodgroup-%s", ujob.Name)
+	svcName := fmt.Sprintf(r.svcName, ujob.Name)
+	pgName := fmt.Sprintf(r.pgName, ujob.Name)
 
 	if err := r.deleteService(reconciler, ctx, svcName, ujob.Namespace, deleteOpts); err != nil {
 		reconciler.Log.Info(fmt.Sprintf("Error in deleting service: %s", err.Error()))
@@ -116,7 +117,7 @@ func (r ElasticHorovodJobController) DeleteAll(reconciler *UnifiedJobReconciler,
 
 func (r ElasticHorovodJobController) ServiceExists(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
 	var svc corev1.Service
-	svcName := fmt.Sprintf("unifiedjobservice-%s", ujob.Name)
+	svcName := fmt.Sprintf(r.svcName, ujob.Name)
 	key := types.NamespacedName{
 		Namespace: ujob.Namespace,
 		Name:      svcName,
@@ -155,36 +156,37 @@ func (r ElasticHorovodJobController) CreateService(reconciler *UnifiedJobReconci
 
 func (r ElasticHorovodJobController) StuckInPending(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
 
-	return false
+	passed := false
 
-	// job, err := r.getJob(ctx, fmt.Sprintf("unifiedjob-%s", ujob.Name), ujob.Namespace, reconciler)
-	// if err != nil {
-	// 	if errors.IsNotFound(err) {
-	// 		reconciler.Log.Info("Job not found.")
-	// 	} else {
-	// 		reconciler.Log.Info(fmt.Sprintf("Job error: %s", err))
-	// 	}
-	// 	return job, err
-	// }
+	for i := 1; i <= 2; i++ {
+		podList, err := r.getSSPods(reconciler, ctx, ujob.Name, ujob.Namespace)
 
-	// if job.Status.Failed == 1 {
-	// 	time.Sleep(10 * time.Second)
-	// 	return true
-	// }
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false
+			}
+			reconciler.Log.Info(fmt.Sprintf("Could not find workers: %s", err.Error()))
+			return false
+		}
 
-	// return false
+		for _, pod := range podList {
+			if pod.Status.Phase == corev1.PodPending {
+				if !passed {
+					time.Sleep(10 * time.Second)
+					passed = true
+					break
+				}
+				return true
+			}
+		}
 
-}
+		if !passed {
+			return false
+		}
 
-func (r ElasticHorovodJobController) IsJobRunning(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) bool {
-
-	job, err := r.getJob(reconciler, ctx, fmt.Sprintf("unifiedjob-%s", ujob.Name), ujob.Namespace)
-	if err != nil {
-		reconciler.Log.Info(fmt.Sprintf("Job error: %s", err))
-		return false
 	}
 
-	return job.Status.Active > 0
+	return false //unreachable
 
 }
 
@@ -192,9 +194,6 @@ func (r ElasticHorovodJobController) PatchAll(reconciler *UnifiedJobReconciler, 
 	//create and patch the job
 	// TODO: Complete
 	m := ujob.Spec.ReplicaSpec.TargetReplicas
-	if len(m) != 1 {
-		reconciler.Log.Info("Target Replicas is incorrect ")
-	}
 
 	var numGpu int64
 	var nodeName string
@@ -233,7 +232,7 @@ func (r ElasticHorovodJobController) PatchAll(reconciler *UnifiedJobReconciler, 
 //DESIRED OBJECTS ------------------------------------------------------
 
 func (r ElasticHorovodJobController) desiredService(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) (corev1.Service, error) {
-	svcName := fmt.Sprintf("unifiedjobservice-%s", ujob.Name)
+	svcName := fmt.Sprintf(r.svcName, ujob.Name)
 	svc := corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -254,7 +253,7 @@ func (r ElasticHorovodJobController) desiredService(reconciler *UnifiedJobReconc
 }
 
 func (r ElasticHorovodJobController) desiredPodGroup(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob) (sigsv1alpha1.PodGroup, error) {
-	pgName := fmt.Sprintf("unifiedjobpodgroup-%s", ujob.Name)
+	pgName := fmt.Sprintf(r.pgName, ujob.Name)
 
 	pg := sigsv1alpha1.PodGroup{
 		TypeMeta: metav1.TypeMeta{APIVersion: "scheduling.sigs.k8s.io/v1alpha1", Kind: "PodGroup"},
@@ -281,8 +280,8 @@ func (r ElasticHorovodJobController) desiredPodGroup(reconciler *UnifiedJobRecon
 }
 
 func (r ElasticHorovodJobController) desiredJob(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, numGpu int64, nodeName string) (batchv1.Job, error) {
-	jobName := fmt.Sprintf("unifiedjob-%s", ujob.Name)
-	svcName := fmt.Sprintf("unifiedjobservice-%s", ujob.Name)
+	jobName := fmt.Sprintf(r.jobName, ujob.Name)
+	svcName := fmt.Sprintf(r.svcName, ujob.Name)
 	//podGroupName := fmt.Sprintf("unifiedjobpodgroup-%s", ujob.Name)
 
 	sshkeysMode := int32(0600)
@@ -291,8 +290,8 @@ func (r ElasticHorovodJobController) desiredJob(reconciler *UnifiedJobReconciler
 	sshSetupCommand := "mkdir -p /root/.ssh; cp /etc/secrets/* /root/.ssh/; chmod 644 /root/.ssh/authorized_keys;"
 	scriptSetupCmd := fmt.Sprintf("mkdir -p /scripts; cp /etc/scripts/* /scripts/; sed -i 's/SERVICENAME/%s/' /scripts/discover_hosts.sh;", svcName)
 	horovodArgs := fmt.Sprintf("-np %d --max-np %d --host-discovery-script /scripts/discover_hosts.sh",
-		ujob.Spec.ReplicaSpec.MinReplicas,
-		ujob.Spec.ReplicaSpec.MaxReplicas)
+		*ujob.Spec.ReplicaSpec.MinReplicas,
+		*ujob.Spec.ReplicaSpec.MaxReplicas)
 	pythonCommand := strings.Join(ujob.Spec.JobSpec.PythonCommand, " ")
 	wholeCommand := fmt.Sprintf("%s %s horovodrun -p 12345 %s %s", sshSetupCommand, scriptSetupCmd, horovodArgs, pythonCommand)
 
@@ -377,9 +376,9 @@ func (r ElasticHorovodJobController) desiredWorkers(reconciler *UnifiedJobReconc
 	//TODO: patch podgroup as well
 	defaultMode := int32(0600)
 	numGpus2 := int32(numGpus)
-	workersName := fmt.Sprintf("unifiedjobworkers-%s", ujob.Name)
-	svcName := fmt.Sprintf("unifiedjobservice-%s", ujob.Name)
-	pgName := fmt.Sprintf("unifiedjobpodgroup-%s", ujob.Name)
+	workersName := fmt.Sprintf(r.workerName, ujob.Name)
+	svcName := fmt.Sprintf(r.svcName, ujob.Name)
+	pgName := fmt.Sprintf(r.pgName, ujob.Name)
 	statefulset := appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -516,6 +515,11 @@ func (r ElasticHorovodJobController) getPodGroup(reconciler *UnifiedJobReconcile
 	}
 
 	return pg, nil
+}
+
+func (r ElasticHorovodJobController) getSSPods(reconciler *UnifiedJobReconciler, ctx context.Context, name string, namespace string) ([]corev1.Pod, error) {
+	labels := map[string]string{"UnifiedJob": name, "role": "worker"}
+	return reconciler.getPodsByLabel(ctx, namespace, labels)
 }
 
 //DELETE OBJECTS------------------------------------------------------

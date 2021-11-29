@@ -20,11 +20,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type UnifiedJobType string
+
 const (
-	BasicJobType          = "BaseJob"
-	ElasticHorovodJobType = "EHJob"
-	ElasticPytorchJobType = "EPJob"
-	HorovodJobType        = "HJob"
+	BasicJobType          UnifiedJobType = "BaseJob"
+	ElasticHorovodJobType UnifiedJobType = "EHJob"
+	ElasticPytorchJobType UnifiedJobType = "EPJob"
+	HorovodJobType        UnifiedJobType = "HJob"
 )
 
 type UnifiedJobStatusType string
@@ -77,7 +79,7 @@ type UnifiedJob struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	JobType string `json:"jobType,omitempty"`
+	JobType UnifiedJobType `json:"jobType,omitempty"`
 
 	Spec   UnifiedJobSpec   `json:"spec,omitempty"`
 	Status UnifiedJobStatus `json:"status,omitempty"`

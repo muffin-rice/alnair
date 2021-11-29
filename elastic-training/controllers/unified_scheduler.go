@@ -82,22 +82,7 @@ func (r *UnifiedSchedulerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	//commented because no partial allocation yet
 
 	//criteria is 1. fulfills maxreplicas 2. num left
-	currNodeConfig := make(map[string]int64)
-
-	for _, nodeName := range sortedKeys {
-		if nodeMap[nodeName] > *ujob.Spec.ReplicaSpec.MaxReplicas {
-			currNodeConfig = map[string]int64{nodeName: *ujob.Spec.ReplicaSpec.MaxReplicas}
-			continue
-		}
-		if nodeMap[nodeName] < *ujob.Spec.ReplicaSpec.MaxReplicas {
-			if len(currNodeConfig) != 0 {
-				break
-			}
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-		currNodeConfig[nodeName] = nodeMap[nodeName]
-		break
-	}
+	currNodeConfig := r.AssignToNewJob(nodeMap, sortedKeys, ujob)
 
 	if len(currNodeConfig) == 0 {
 		log.Info("No suitable node configuration found.")
@@ -217,6 +202,27 @@ func (r *UnifiedSchedulerReconciler) RescheduleJobs(nodeMap map[string]int64, qu
 	//sort jobs by
 	//do simple nothing
 	return nil
+}
+
+func (r *UnifiedSchedulerReconciler) AssignToNewJob(nodeMap map[string]int64, sortedKeys []string, ujob aiv1alpha1.UnifiedJob) map[string]int64 {
+	currNodeConfig := make(map[string]int64)
+
+	for _, nodeName := range sortedKeys {
+		if nodeMap[nodeName] > *ujob.Spec.ReplicaSpec.MaxReplicas {
+			currNodeConfig = map[string]int64{nodeName: *ujob.Spec.ReplicaSpec.MaxReplicas}
+			continue
+		}
+		if nodeMap[nodeName] < *ujob.Spec.ReplicaSpec.MaxReplicas {
+			if len(currNodeConfig) != 0 {
+				break
+			}
+			return currNodeConfig
+		}
+		currNodeConfig[nodeName] = nodeMap[nodeName]
+		break
+	}
+
+	return currNodeConfig
 }
 
 func (r *UnifiedSchedulerReconciler) updateTargetReplicas(ctx context.Context, ujob aiv1alpha1.UnifiedJob, nodeConfig map[string]int64) error {
