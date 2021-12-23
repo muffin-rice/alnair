@@ -45,6 +45,8 @@ const (
 type UnifiedJobSpec struct {
 	ReplicaSpec UnifiedJobReplicaSpec `json:"replicaSpec,omitempty"`
 	JobSpec     UnifiedJobWorkersSpec `json:"jobSpec,omitempty"`
+
+	Reschedulable bool `json:"reschedulable"`
 }
 
 type UnifiedJobReplicaSpec struct {
@@ -59,8 +61,8 @@ type UnifiedJobReplicaSpec struct {
 }
 
 type UnifiedJobWorkersSpec struct {
-	Image         string   `json:"image"`
-	PythonCommand []string `json:"pythonCommand"`
+	Image       string   `json:"image"`
+	UnifiedArgs []string `json:"unifiedArgs"`
 }
 
 // UnifiedJobStatus defines the observed state of UnifiedJob

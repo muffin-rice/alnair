@@ -54,9 +54,11 @@ var _ = Describe("GPU Scheduler", func() {
 					MaxReplicas: &five,
 				},
 				JobSpec: aiv1alpha1.UnifiedJobWorkersSpec{
-					Image:         "test",
-					PythonCommand: []string{"python", "test.py"},
+					Image:       "test",
+					UnifiedArgs: []string{"python", "test.py"},
 				},
+
+				Reschedulable: false,
 			},
 		}
 

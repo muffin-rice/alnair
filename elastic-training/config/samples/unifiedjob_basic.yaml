@@ -6,8 +6,9 @@ jobType: BaseJob
 spec:
   jobSpec:
     image: hxhp/elastic-horovod-demo:1.0
-    pythonCommand:
+    unifiedArgs:
       - sleep 600
   replicaSpec:
     minReplicas: 2
     maxReplicas: 5
+  reschedulable: true

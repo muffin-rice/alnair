@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -85,6 +86,11 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobCompleted || ujob.Status.UnifiedJobStatus == aiv1alpha1.JobFailed {
+		log.Info("Job is already finished, do not make further changes.")
+		return ctrl.Result{}, nil
+	}
+
 	jobController := r.JobInterfaceMap[ujob.JobType]
 
 	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("unifiedjob-controller")}
@@ -96,7 +102,13 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	if !change {
+	//re-get ujob status
+	time.Sleep(3 * time.Second)
+	if err := r.Get(ctx, req.NamespacedName, &ujob); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !change && ujob.Status.UnifiedJobStatus != aiv1alpha1.JobPending {
 		return ctrl.Result{}, nil
 	}
 
@@ -104,18 +116,18 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info(fmt.Sprintf("Job %s updated status to %s", ujob.Name, ujob.Status.UnifiedJobStatus))
 	}
 
-	zero := int64(0)
-	deletepolicy := metav1.DeletePropagationForeground
-	deleteOpts := []client.DeleteOption{&client.DeleteOptions{
-		GracePeriodSeconds: &zero,
-		PropagationPolicy:  &deletepolicy,
-	}}
-
 	//do nothing if job completed
 	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobWaiting {
 		log.Info("Nothing in TargetReplicas")
 		return ctrl.Result{}, nil
 	}
+
+	grace := int64(10)
+	deletepolicy := metav1.DeletePropagationForeground
+	deleteOpts := []client.DeleteOption{&client.DeleteOptions{
+		GracePeriodSeconds: &grace,
+		PropagationPolicy:  &deletepolicy,
+	}}
 
 	//check if job completed
 	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobCompleted {
@@ -128,9 +140,12 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	//may want to treat completed jobs and errored jobs differently
 	if ujob.Status.UnifiedJobStatus == aiv1alpha1.JobFailed {
-		log.Info("Job has failed.")
+		log.Info("Job has failed.") //upon failure, reset target replicas,
 		if err := jobController.DeleteAll(r, ctx, ujob, deleteOpts); err != nil {
 			log.Info(fmt.Sprintf("Error in cleaning up resources: %s.", err.Error()))
+		}
+		if err := r.resetTargetReplicas(ctx, ujob); err != nil {
+			log.Info(fmt.Sprintf("Error in resetting target replicas: %s.", err.Error()))
 		}
 		return ctrl.Result{}, nil
 	}
@@ -163,6 +178,7 @@ func (r *UnifiedJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.resetTargetReplicas(ctx, ujob); err != nil {
 			log.Info(fmt.Sprintf("Error in resetting target replicas: %s.", err.Error()))
 		}
+		time.Sleep(3 * time.Second)
 		return ctrl.Result{}, nil
 	}
 
@@ -186,12 +202,11 @@ func (r *UnifiedJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	var torchelastic_controller UnifiedJobInterface = TorchElasticJobController{
 		etcdSvcName:    "torchelastic-etcd-service",
 		etcdServerName: "etcd",
-		jobName:        "epjob-%s",
-		jobID:          "epjobid-%s",
-		workerName:     "epworkers-%s-%d-%d",
-		workerSvcName:  "epworkers-%s-service",
-		launcherName:   "eplauncher-%s",
-		pgName:         "eppodgroup-%s",
+		jobName:        "%s-epjob",
+		jobID:          "%s-epjobid",
+		workerName:     "%s-workers-%d",
+		workerSvcName:  "%s-workers-service",
+		launcherName:   "%s-launcher",
 	}
 	var elastichorovod_controller UnifiedJobInterface = ElasticHorovodJobController{
 		svcName:    "ehservice-%s",
@@ -219,6 +234,8 @@ func (r *UnifiedJobReconciler) resetTargetReplicas(ctx context.Context, ujob aiv
 	return r.Update(ctx, &ujob)
 }
 
+//GENERIC HELPER FUNCTIONS -----------------------------------------------
+
 func (r *UnifiedJobReconciler) getPodsByLabel(ctx context.Context, namespace string, labels map[string]string) ([]corev1.Pod, error) {
 	var pl corev1.PodList
 
@@ -234,18 +251,42 @@ func (r *UnifiedJobReconciler) getPodsByLabel(ctx context.Context, namespace str
 	return pl.Items, nil
 }
 
-//GENERIC HELPER FUNCTIONS -----------------------------------------------
+func (r *UnifiedJobReconciler) getService(ctx context.Context, name string, namespace string) (corev1.Service, error) {
+	//generic get service (can be used for etcd service and pod service)
+	var svc corev1.Service
+	key := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := r.Get(ctx, key, &svc); err != nil {
+		return svc, err
+	}
+
+	return svc, nil
+}
+
+func (r *UnifiedJobReconciler) getPod(ctx context.Context, name string, namespace string) (corev1.Pod, error) {
+	//generic get service (can be used for etcd service and pod service)
+	var pod corev1.Pod
+	key := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	if err := r.Get(ctx, key, &pod); err != nil {
+		return pod, err
+	}
+
+	return pod, nil
+}
 
 func getCurrentNodeConfig(podList []corev1.Pod) map[string]int64 {
 	nodeMap := make(map[string]int64)
 
 	for _, pod := range podList {
-		nodeName := pod.Spec.NodeName
-		if _, ok := nodeMap[nodeName]; ok {
-			nodeMap[nodeName] = 1
-		} else {
-			nodeMap[nodeName] += 1
-		}
+		quant := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]
+		nodeMap[pod.Spec.NodeName] = quant.ToDec().Value()
 	}
 
 	return nodeMap
@@ -257,4 +298,17 @@ func getTotalGPU(nodeMap map[string]int64) int {
 		total += int(numGpu)
 	}
 	return total
+}
+
+func podPending(pod corev1.Pod) bool {
+	//unexpectedadmissionerror = pending
+	if pod.Status.Phase == corev1.PodPending {
+		return true
+	}
+
+	if pod.Status.Phase == corev1.PodFailed && pod.Status.Reason == "UnexpectedAdmissionError" {
+		return true
+	}
+
+	return false
 }

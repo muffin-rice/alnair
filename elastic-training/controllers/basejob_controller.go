@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	aiv1alpha1 "elastictraining/api/v1alpha1"
+	errors2 "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -50,33 +51,38 @@ func (r BaseJobController) UpdateStatus(reconciler *UnifiedJobReconciler, ctx co
 	if ujob.Spec.ReplicaSpec.TargetReplicas == nil {
 		newStatus = aiv1alpha1.JobWaiting
 	} else if len(ujob.Spec.ReplicaSpec.TargetReplicas) > 1 {
-		newStatus = aiv1alpha1.JobPending
+		newStatus = aiv1alpha1.JobFailed
 		reconciler.Log.Info("Target Replicas is incorrect; stay in pending until restart")
 	} else {
 		job, err := r.getJob(reconciler, ctx, jobName, ujob.Namespace)
 		if err != nil {
 			if !errors.IsNotFound(err) {
-				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
+				reconciler.Log.Info(fmt.Sprintf("Error in querying job: %s.", err.Error()))
 			}
-			return false, nil
-		}
-
-		pod, err := r.getJobPod(reconciler, ctx, job)
-		if err != nil {
-			if !errors.IsNotFound(err) {
-				reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
-			}
-			return false, nil
-		}
-
-		if pod.Status.Phase == corev1.PodPending {
 			newStatus = aiv1alpha1.JobPending
-		} else if pod.Status.Phase == corev1.PodRunning {
-			newStatus = aiv1alpha1.JobRunning
-		} else if pod.Status.Phase == corev1.PodFailed {
-			newStatus = aiv1alpha1.JobFailed
-		} else if pod.Status.Phase == corev1.PodSucceeded {
-			newStatus = aiv1alpha1.JobCompleted
+		} else {
+			pod, err := r.getJobPod(reconciler, ctx, job)
+			if err != nil {
+				if err.Error() != "IsNotFound" {
+					reconciler.Log.Info(fmt.Sprintf("Error in querying workers: %s.", err.Error()))
+				}
+				return false, nil
+			}
+
+			if podPending(pod) {
+				newStatus = aiv1alpha1.JobPending
+			} else if pod.Status.Phase == corev1.PodRunning {
+				newStatus = aiv1alpha1.JobRunning
+			} else if pod.Status.Phase == corev1.PodFailed {
+				if pod.Status.Reason == "UnexpectedAdmissionError" {
+					newStatus = aiv1alpha1.JobPending
+				} else {
+					newStatus = aiv1alpha1.JobFailed
+				}
+			} else if pod.Status.Phase == corev1.PodSucceeded {
+				newStatus = aiv1alpha1.JobCompleted
+			}
+
 		}
 	}
 
@@ -131,7 +137,7 @@ func (r BaseJobController) StuckInPending(reconciler *UnifiedJobReconciler, ctx 
 			return false
 		}
 
-		if pod.Status.Phase == corev1.PodPending {
+		if podPending(pod) {
 			if !passed {
 				time.Sleep(10 * time.Second)
 				passed = true
@@ -178,14 +184,13 @@ func (r BaseJobController) PatchAll(reconciler *UnifiedJobReconciler, ctx contex
 func (r BaseJobController) desiredJob(reconciler *UnifiedJobReconciler, ctx context.Context, ujob aiv1alpha1.UnifiedJob, numGpu int64, nodeName string) (batchv1.Job, error) {
 
 	one := int32(1)
-	command := strings.Join(ujob.Spec.JobSpec.PythonCommand, " ")
+	command := strings.Join(ujob.Spec.JobSpec.UnifiedArgs, " ")
 
 	job := batchv1.Job{
 		TypeMeta: metav1.TypeMeta{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("unifiedjob-%s", ujob.Name),
 			Namespace: ujob.Namespace,
-			Labels:    map[string]string{"UnifiedEPTJob": ujob.Name},
 		},
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
@@ -239,10 +244,14 @@ func (r BaseJobController) getJob(reconciler *UnifiedJobReconciler, ctx context.
 
 func (r BaseJobController) getJobPod(reconciler *UnifiedJobReconciler, ctx context.Context, job batchv1.Job) (corev1.Pod, error) {
 	labels := map[string]string{
-		"UnifiedEPTJob": job.Name,
+		"job-name": job.Name, //kubernetes auto-generated
 	}
 
 	podList, err := reconciler.getPodsByLabel(ctx, job.Namespace, labels)
+	if len(podList) == 0 {
+		var pod corev1.Pod
+		return pod, errors2.New("IsNotFound")
+	}
 	return podList[0], err
 }
 

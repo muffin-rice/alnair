@@ -292,7 +292,7 @@ func (r ElasticHorovodJobController) desiredJob(reconciler *UnifiedJobReconciler
 	horovodArgs := fmt.Sprintf("-np %d --max-np %d --host-discovery-script /scripts/discover_hosts.sh",
 		*ujob.Spec.ReplicaSpec.MinReplicas,
 		*ujob.Spec.ReplicaSpec.MaxReplicas)
-	pythonCommand := strings.Join(ujob.Spec.JobSpec.PythonCommand, " ")
+	pythonCommand := strings.Join(ujob.Spec.JobSpec.UnifiedArgs, " ")
 	wholeCommand := fmt.Sprintf("%s %s horovodrun -p 12345 %s %s", sshSetupCommand, scriptSetupCmd, horovodArgs, pythonCommand)
 
 	job := batchv1.Job{
